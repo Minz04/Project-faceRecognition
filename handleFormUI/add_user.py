@@ -1,30 +1,23 @@
-# -*- coding: utf-8 -*-
 import cv2
+import sys
 import os
 import random
 import numpy as np
-import traceback # Để in chi tiết lỗi nếu có
+import traceback
 from PyQt5.QtWidgets import QDialog, QMessageBox
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal
-
-# Import class giao diện đã được pyuic tạo ra
 from ui_form_ChupAnh import Ui_Form
 
-# Quan trọng: Import hàm tạo embedding từ file CodeGenerator
-# Đảm bảo file CodeGenerator_facenet.py có thể chạy độc lập hoặc hàm của nó có thể được gọi
 try:
     from CodeGenerator_facenet import generate_and_save_embeddings
 except ImportError:
-    print("[LỖI] Không thể import 'generate_and_save_embeddings' từ CodeGenerator_facenet.py")
-    # Nếu không import được, chức năng thêm người sẽ không thể cập nhật embeddings
+    print("[LỖI] Không thể import 'generate_and_save_embeddings'")
     generate_and_save_embeddings = None
 
-IMAGES_FOLDER = os.path.join('Resources', 'Images') # Đường dẫn thư mục lưu ảnh người dùng
+IMAGES_FOLDER = "dataset"
 
 class AddUserDialog(QDialog, Ui_Form):
-    # Tín hiệu sẽ được phát ra khi người dùng mới được thêm thành công
-    # để cửa sổ chính biết và yêu cầu worker tải lại embeddings
     user_added = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -32,174 +25,154 @@ class AddUserDialog(QDialog, Ui_Form):
         self.setupUi(self)
         self.setWindowTitle("Thêm Người Dùng Mới")
 
-        self.capture = None       # Đối tượng VideoCapture để truy cập camera
-        self.timer = QTimer(self) # Timer để cập nhật preview từ camera
+        self.capture = None
+        self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_preview)
-        self.captured_image = None # Biến lưu ảnh đã chụp (dạng numpy array BGR)
+        self.captured_image = None
 
-        # Kết nối các nút với hàm xử lý tương ứng
         self.btnChupAnh.clicked.connect(self.capture_image_action)
         self.btnDongY.clicked.connect(self.confirm_action)
         self.btnHuy.clicked.connect(self.cancel_action)
 
-        self.init_camera() # Khởi tạo camera
-        self.reset_ui_to_capture_mode() # Đặt giao diện về trạng thái ban đầu (chờ chụp)
+        self.init_camera()
+        self.reset_ui_to_capture_mode()
 
     def init_camera(self):
-        """Khởi tạo kết nối với webcam."""
-        self.capture = cv2.VideoCapture(0)
-        if not self.capture.isOpened():
-            QMessageBox.warning(self, "Lỗi Camera", "Không thể mở webcam.")
-            self.btnChupAnh.setEnabled(False) # Vô hiệu hóa nút chụp nếu không có cam
-        else:
-            # Bắt đầu timer để hiển thị preview (chỉ khi camera mở thành công)
-            self.timer.start(30) # Cập nhật khoảng 30ms một lần
+        try:
+            self.capture = cv2.VideoCapture(0)
+            if not self.capture or not self.capture.isOpened():
+                print("Không mở được camera 0, thử camera 1...")
+                self.capture = cv2.VideoCapture(1)
+                if not self.capture or not self.capture.isOpened():
+                    raise ValueError("Không thể mở camera.")
+
+            self.timer.start(30)
+            print("Camera đã khởi tạo.")
+            self.btnChupAnh.setEnabled(True)
+
+        except Exception as e:
+            QMessageBox.warning(self, "Lỗi Camera", f"Không thể mở webcam.\nChi tiết: {e}")
+            self.btnChupAnh.setEnabled(False)
+            self.capture = None
 
     def update_preview(self):
-        """Liên tục đọc frame từ camera và hiển thị lên labelCamera."""
-        # Chỉ chạy khi camera tồn tại, đang mở và timer đang hoạt động (chế độ preview)
         if self.capture and self.capture.isOpened() and self.timer.isActive():
             ret, frame_bgr = self.capture.read()
             if ret:
-                # Chuyển BGR sang RGB để QPixmap hiển thị đúng màu
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                h, w, ch = frame_rgb.shape
-                qt_image = QImage(frame_rgb.data, w, h, w * ch, QImage.Format_RGB888)
-                pixmap = QPixmap.fromImage(qt_image)
-                # Hiển thị ảnh, co dãn để vừa với label nhưng giữ tỷ lệ
-                self.labelCamera.setPixmap(pixmap.scaled(self.labelCamera.size(),
-                                                          Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                try:
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    h, w, ch = frame_rgb.shape
+                    bytes_per_line = ch * w
+                    qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                    pixmap = QPixmap.fromImage(qt_image)
+                    self.labelCamera.setPixmap(pixmap.scaled(self.labelCamera.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                except Exception as e:
+                    print(f"Lỗi hiển thị frame: {e}")
 
     def reset_ui_to_capture_mode(self):
-        """Đặt lại giao diện về trạng thái chờ người dùng bấm nút chụp ảnh."""
-        self.txtTenNguoiMoi.hide() # Ẩn ô nhập tên
-        self.btnDongY.hide()       # Ẩn nút Đồng ý
-        self.btnHuy.hide()         # Ẩn nút Hủy
-        self.labelCamera.clear()   # Xóa ảnh đang hiển thị (nếu có)
-        self.captured_image = None # Xóa ảnh đã chụp trước đó (nếu có)
-        self.txtTenNguoiMoi.clear()# Xóa tên đã nhập trước đó (nếu có)
+        self.txtTenNguoiMoi.hide()
+        self.btnDongY.hide()
+        self.btnHuy.hide()
+        self.labelCamera.clear()
+        self.labelCamera.setText("(Hướng camera vào mặt và nhấn Chụp Ảnh)")
+        self.captured_image = None
+        self.txtTenNguoiMoi.clear()
 
-        self.btnChupAnh.show()     # Hiện nút Chụp ảnh
-        # Kích hoạt nút chụp chỉ khi camera sẵn sàng
+        self.btnChupAnh.show()
         self.btnChupAnh.setEnabled(self.capture is not None and self.capture.isOpened())
 
-        # Nếu timer chưa chạy (ví dụ sau khi nhấn Hủy), khởi động lại để hiển thị preview
-        if not self.timer.isActive() and self.capture and self.capture.isOpened():
+        if self.capture and self.capture.isOpened() and not self.timer.isActive():
             self.timer.start(30)
 
     def capture_image_action(self):
-        """Thực hiện chụp ảnh từ camera và chuyển sang giao diện nhập tên."""
         if self.capture and self.capture.isOpened():
-            ret, frame_bgr = self.capture.read() # Đọc frame hiện tại từ camera
-            if ret:
-                self.timer.stop() # Dừng cập nhật preview, giữ nguyên ảnh vừa chụp
-                self.captured_image = frame_bgr # Lưu ảnh đã chụp (BGR)
+            ret, frame_bgr = self.capture.read()
+            if ret and frame_bgr is not None:
+                self.timer.stop()
+                self.captured_image = frame_bgr.copy()
 
-                # Hiển thị ảnh vừa chụp lên labelCamera
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                h, w, ch = frame_rgb.shape
-                qt_image = QImage(frame_rgb.data, w, h, w * ch, QImage.Format_RGB888)
-                pixmap = QPixmap.fromImage(qt_image)
-                self.labelCamera.setPixmap(pixmap.scaled(self.labelCamera.size(),
-                                                          Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                try:
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    h, w, ch = frame_rgb.shape
+                    bytes_per_line = ch * w
+                    qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                    pixmap = QPixmap.fromImage(qt_image)
+                    self.labelCamera.setPixmap(pixmap.scaled(self.labelCamera.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
-                # Chuyển đổi giao diện: ẩn nút chụp, hiện các control nhập liệu
-                self.btnChupAnh.hide()
-                self.txtTenNguoiMoi.show()
-                self.btnDongY.show()
-                self.btnHuy.show()
-                self.txtTenNguoiMoi.setFocus() # Đặt con trỏ vào ô nhập tên
+                    self.btnChupAnh.hide()
+                    self.txtTenNguoiMoi.show()
+                    self.btnDongY.show()
+                    self.btnHuy.show()
+                    self.txtTenNguoiMoi.setFocus()
+                except Exception as e:
+                    QMessageBox.warning(self, "Lỗi", f"Lỗi hiển thị ảnh: {e}")
+                    traceback.print_exc()
+                    self.reset_ui_to_capture_mode()
             else:
-                QMessageBox.warning(self, "Lỗi Chụp Ảnh", "Không thể đọc frame từ camera.")
-                self.reset_ui_to_capture_mode() # Quay lại trạng thái chờ chụp
+                QMessageBox.warning(self, "Lỗi", "Không thể chụp ảnh. Thử lại.")
+                self.reset_ui_to_capture_mode()
         else:
-             QMessageBox.warning(self, "Lỗi Camera", "Camera chưa sẵn sàng.")
+            QMessageBox.warning(self, "Lỗi", "Camera chưa sẵn sàng.")
+            self.reset_ui_to_capture_mode()
 
     def confirm_action(self):
-        """Xử lý khi nhấn nút Đồng ý: Lưu ảnh, tạo ID, chạy lại embedding, đóng dialog."""
-        user_name = self.txtTenNguoiMoi.text().strip() # Lấy tên và xóa khoảng trắng thừa
+        user_name_raw = self.txtTenNguoiMoi.text()
+        user_name = ''.join(c for c in user_name_raw if c.isalnum() or c in [' ', '_', '-']).strip()
+        user_name = '_'.join(user_name.split())
+
         if not user_name:
-            QMessageBox.warning(self, "Thiếu Thông Tin", "Vui lòng nhập tên người dùng.")
+            QMessageBox.warning(self, "Thiếu Thông Tin", "Vui lòng nhập tên hợp lệ.")
             return
+
         if self.captured_image is None:
-             QMessageBox.critical(self, "Lỗi Logic", "Chưa có ảnh nào được chụp để lưu.")
-             self.reset_ui_to_capture_mode()
-             return
-        # Kiểm tra xem hàm tạo embedding có sẵn sàng không
-        if not generate_and_save_embeddings:
-            QMessageBox.critical(self,"Lỗi Hệ Thống", "Chức năng tạo embedding không hoạt động (kiểm tra import).")
+            QMessageBox.critical(self, "Lỗi", "Chưa có ảnh được chụp.")
+            self.reset_ui_to_capture_mode()
             return
 
-        # --- Tạo ID ngẫu nhiên và đảm bảo không trùng ---
+        if not generate_and_save_embeddings:
+            QMessageBox.critical(self, "Lỗi Hệ Thống", "Hàm generate_and_save_embeddings không khả dụng.")
+            return
+
+        # Tạo thư mục tên duy nhất
         new_id_str = ""
-        filename = ""
-        max_tries = 100 # Giới hạn số lần thử tạo ID để tránh vòng lặp vô hạn
-        for _ in range(max_tries):
-            temp_id = random.randint(1, 9999) # Random ID từ 1 đến 9999
-            formatted_id = str(temp_id)      # Chuyển thành chuỗi
-            # Tạo tên file dự kiến theo định dạng "ID_Tên.png"
-            potential_filename = f"{formatted_id}_{user_name}.png" # Lưu dưới dạng PNG
-            id_exists = False # Cờ kiểm tra ID đã tồn tại chưa
-            if os.path.exists(IMAGES_FOLDER):
-                 # Duyệt qua các file trong thư mục Images để kiểm tra ID
-                 for existing_file in os.listdir(IMAGES_FOLDER):
-                     # Kiểm tra xem tên file có bắt đầu bằng "ID_" không
-                     if existing_file.startswith(formatted_id + "_"):
-                         id_exists = True
-                         break # Đã tìm thấy ID trùng, không cần kiểm tra nữa
-            if not id_exists: # Nếu ID này chưa tồn tại
-                new_id_str = formatted_id # Lưu ID hợp lệ
-                filename = potential_filename # Lưu tên file hợp lệ
-                break # Thoát vòng lặp vì đã tìm được ID duy nhất
+        folder_name = ""
+        for _ in range(100):
+            temp_id = random.randint(100, 999)
+            formatted_id = f"{temp_id:03d}"
+            potential_folder_name = f"{formatted_id}_{user_name}"
+            potential_folder_path = os.path.join(IMAGES_FOLDER, potential_folder_name)
 
-        if not new_id_str: # Nếu sau max_tries vẫn không tìm được ID duy nhất
-             QMessageBox.critical(self, "Lỗi Tạo ID", f"Không thể tạo ID duy nhất sau {max_tries} lần thử. Thư mục Images có thể đã đầy hoặc có lỗi.")
-             self.reset_ui_to_capture_mode() # Cho phép người dùng thử lại
-             return
+            if not os.path.exists(potential_folder_path):
+                new_id_str = formatted_id
+                folder_name = potential_folder_name
+                break
 
-        # --- Lưu ảnh và gọi hàm tạo lại embeddings ---
-        save_path = os.path.join(IMAGES_FOLDER, filename)
+        if not new_id_str:
+            QMessageBox.critical(self, "Lỗi", "Không thể tạo thư mục duy nhất.")
+            self.reset_ui_to_capture_mode()
+            return
+
+        folder_path = os.path.join(IMAGES_FOLDER, folder_name)
+        image_filename = f"{folder_name}.png"
+        save_path = os.path.join(folder_path, image_filename)
+
         try:
-            os.makedirs(IMAGES_FOLDER, exist_ok=True) # Tạo thư mục nếu chưa có
-            # Lưu ảnh đã chụp (dạng BGR) vào file
+            os.makedirs(folder_path, exist_ok=True)
             success = cv2.imwrite(save_path, self.captured_image)
             if not success:
-                 raise IOError("Lưu ảnh thất bại (cv2.imwrite trả về false).")
-            print(f"Ảnh đã được lưu thành công: {save_path}")
+                raise IOError(f"Lưu ảnh thất bại tại '{save_path}'")
+            print(f"Đã lưu ảnh: {save_path}")
 
-            # *** Rất quan trọng: Gọi lại hàm để cập nhật file embeddings ***
-            print("Đang tạo lại file embeddings...")
-            # Hàm này sẽ đọc lại toàn bộ thư mục Images (bao gồm cả ảnh mới)
-            # và ghi đè lại file Embeddings_Facenet.p
-            embedding_success = generate_and_save_embeddings()
-
-            if embedding_success:
-                QMessageBox.information(self, "Thành Công", f"Đã lưu người dùng '{user_name}' (ID: {new_id_str}) và cập nhật embeddings.")
-                self.user_added.emit() # Phát tín hiệu báo đã thêm thành công
-                self.accept() # Đóng dialog với trạng thái thành công (OK)
-            else:
-                 # Lưu ảnh thành công nhưng embedding lỗi
-                 QMessageBox.warning(self, "Lưu Ảnh OK, Embedding Lỗi", f"Đã lưu ảnh '{filename}' nhưng cập nhật file embeddings thất bại. Nhận diện có thể không chính xác cho người mới. Hãy thử chạy lại CodeGenerator thủ công.")
-                 # Vẫn phát tín hiệu và đóng dialog, nhưng cảnh báo người dùng
-                 self.user_added.emit() # Vẫn phát tín hiệu để cửa sổ chính biết
-                 self.accept()
+            print("Đang cập nhật embeddings...")
+            generate_and_save_embeddings()
+            QMessageBox.information(self, "Thành công", "Người dùng đã được thêm.")
+            self.user_added.emit()
+            self.close()
 
         except Exception as e:
-            QMessageBox.critical(self, "Lỗi Lưu File hoặc Embedding", f"Quá trình lưu bị lỗi!\nChi tiết: {e}")
-            traceback.print_exc() # In lỗi chi tiết ra console để debug
-            # Không đóng dialog, cho phép người dùng thử lại sau khi xem lỗi
+            QMessageBox.critical(self, "Lỗi", f"Có lỗi khi lưu ảnh hoặc tạo embedding: {e}")
+            traceback.print_exc()
             self.reset_ui_to_capture_mode()
 
     def cancel_action(self):
-        """Xử lý khi nhấn nút Hủy: Quay lại trạng thái chờ chụp ảnh."""
         self.reset_ui_to_capture_mode()
-
-    def closeEvent(self, event):
-        """Được gọi tự động khi cửa sổ dialog đóng (bằng nút X hoặc các lệnh accept/reject)."""
-        print("Đang đóng cửa sổ Thêm Người Dùng...")
-        self.timer.stop() # Dừng timer cập nhật preview
-        if self.capture and self.capture.isOpened():
-            self.capture.release() # Giải phóng camera
-            print("Camera của cửa sổ Thêm Người Dùng đã được giải phóng.")
-        self.capture = None # Đặt lại biến camera
-        super().closeEvent(event) # Gọi hàm closeEvent của lớp cha

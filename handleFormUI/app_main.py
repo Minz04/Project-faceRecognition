@@ -1,9 +1,11 @@
 import sys
 import os
 
-# Tạo đường dẫn đến thư mục chứa file này
+# Lấy thư mục gốc của project
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)
+
+# Thêm thư mục gốc vào sys.path nếu chưa có
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
@@ -13,191 +15,212 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox, QLabel, QDia
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt, pyqtSlot
 from ui_form_FaceRecognition import Ui_MainWindow
-from handleFormUI.worker import RecognitionWorker
-from handleFormUI.add_user import AddUserDialog
 
-# --- Định nghĩa đường dẫn thư mục ảnh gốc ---
-IMAGES_FOLDER = os.path.join(project_root, 'Resources', 'Images')
-print(f"Thư mục ảnh gốc được xác định là: {IMAGES_FOLDER}")
-if not os.path.isdir(IMAGES_FOLDER):
-    print(f"[CẢNH BÁO] Không tìm thấy thư mục ảnh gốc tại: {IMAGES_FOLDER}")
+# Nhập các module worker và add_user
+try:
+    from handleFormUI.worker import RecognitionWorker
+    from handleFormUI.add_user import AddUserDialog
+except ImportError:
+    try:
+        from worker import RecognitionWorker
+        from add_user import AddUserDialog
+    except ImportError as e:
+        print(f"[LỖI] Không thể nhập RecognitionWorker hoặc AddUserDialog: {e}")
+        sys.exit(1)
 
-print("Đang khởi tạo model MTCNN và FaceNet...")
-MODELS_LOADED = False
-DETECTOR = None
-EMBEDDER = None
+# Xác định đường dẫn thư mục dataset
+dataset_folder = os.path.join(project_root, 'dataset')
+
+# Tạo thư mục dataset nếu chưa tồn tại
+if not os.path.isdir(dataset_folder):
+    try:
+        os.makedirs(dataset_folder, exist_ok=True)
+    except Exception as e:
+        print(f"[LỖI] Không thể tạo thư mục dataset: {e}")
+
+# Khởi tạo model MTCNN và FaceNet
+models_loaded = False
+detector = None
+embedder = None
 try:
     from mtcnn.mtcnn import MTCNN
     from keras_facenet import FaceNet
-    DETECTOR = MTCNN()
-    EMBEDDER = FaceNet()
-    print("Khởi tạo models thành công.")
-    MODELS_LOADED = True
+    detector = MTCNN()
+    embedder = FaceNet()
+    models_loaded = True
 except Exception as e:
-    print(f"[LỖI] Không thể khởi tạo models: {e}")
+    print(f"[LỖI] Không thể khởi tạo model: {e}")
 
-EMBEDDING_FILEPATH = os.path.join('EmbeddingPicture', 'Embeddings_Facenet.p')
-if MODELS_LOADED and not os.path.exists(EMBEDDING_FILEPATH):
-    print(f"File embeddings không tồn tại tại {EMBEDDING_FILEPATH}. Đang thử tạo lần đầu...")
+# Xác định đường dẫn file embedding
+embedding_folder = os.path.join(project_root, 'EmbeddingPicture')
+embedding_file = os.path.join(embedding_folder, 'Embeddings_Facenet.p')
+
+# Tạo file embedding nếu chưa tồn tại và model đã tải
+if models_loaded and not os.path.exists(embedding_file):
     try:
         from CodeGenerator_facenet import generate_and_save_embeddings
         if generate_and_save_embeddings():
-            print("Đã tạo file embeddings ban đầu thành công.")
+            print("Tạo file embedding ban đầu thành công.")
         else:
-            print("[CẢNH BÁO] Tạo file embeddings ban đầu thất bại.")
-    except Exception as gen_e:
-        print(f"[CẢNH BÁO] Lỗi trong quá trình tạo embeddings ban đầu: {gen_e}")
+            print("[CẢNH BÁO] Không thể tạo file embedding ban đầu.")
+    except Exception as e:
+        print(f"[LỖI] Lỗi khi tạo file embedding: {e}")
 
-# 
 class FaceRecognitionApp(QMainWindow, Ui_MainWindow):
     def __init__(self, detector, embedder, parent=None):
         super().__init__(parent)
         self.setupUi(self)
-        self.setWindowTitle("Ứng dụng Nhận Diện Khuôn Mặt")
+        self.setWindowTitle("Ứng dụng Nhận Diện Khuôn Mặt (FaceNet + MTCNN)")
 
         self.detector = detector
         self.embedder = embedder
         self.recognition_worker = None
         self.add_user_dialog = None
 
-        if not MODELS_LOADED:
-            self.labelCamera.setText("Lỗi: Không tải được model nhận diện.")
+        # Xử lý khi model không tải được
+        if not models_loaded:
+            self.labelCamera.setText("LỖI:\nKhông thể tải model MTCNN hoặc FaceNet.\nVui lòng kiểm tra cài đặt.")
+            self.labelCamera.setAlignment(Qt.AlignCenter)
+            self.labelCamera.setStyleSheet("QLabel { color: red; font-weight: bold; }")
             self.btnAddPerson.setEnabled(False)
-            QMessageBox.critical(self, "Lỗi Model", "Không thể khởi tạo model nhận diện. Ứng dụng không thể hoạt động.")
-            return
+            self.statusBar().showMessage("Lỗi khởi tạo model!")
+            QMessageBox.critical(self, "Lỗi Model", "Không thể khởi tạo model MTCNN/FaceNet. Kiểm tra console để biết chi tiết.")
+        else:
+            # Khởi động worker nhận diện nếu model tải thành công
+            self.recognition_worker = RecognitionWorker(self.detector, self.embedder, embedding_file, parent=self)
+            self.recognition_worker.signals.frame_ready.connect(self.update_camera_feed)
+            self.recognition_worker.signals.recognition_result.connect(self.update_recognition_info)
+            self.recognition_worker.signals.no_recognition.connect(self.clear_recognition_info)
+            self.recognition_worker.signals.error.connect(self.show_worker_error)
+            self.recognition_worker.signals.embeddings_loaded.connect(self.update_status_bar)
+            self.recognition_worker.start()
+            self.statusBar().showMessage("Đang khởi động worker và tải embedding...")
 
-        print("Đang khởi động worker nhận diện...")
-        self.recognition_worker = RecognitionWorker(self.detector, self.embedder)
-
-        self.recognition_worker.signals.frame_ready.connect(self.update_camera_feed)
-        self.recognition_worker.signals.recognition_result.connect(self.update_recognition_info) # Kết nối đến hàm đã sửa đổi
-        self.recognition_worker.signals.no_recognition.connect(self.clear_recognition_info)
-        self.recognition_worker.signals.error.connect(self.show_worker_error)
-        self.recognition_worker.signals.embeddings_loaded.connect(self.update_status_bar)
-
-        self.recognition_worker.start()
-
+        # Thiết lập giao diện ban đầu
         self.btnAddPerson.clicked.connect(self.open_add_user_dialog)
         self.labelPicturePerson.setAlignment(Qt.AlignCenter)
+        self.labelPicturePerson.setText("(Chưa nhận diện)")
         self.txt_name_person.setReadOnly(True)
         self.txt_id_person.setReadOnly(True)
         self.clear_recognition_info()
 
     @pyqtSlot(QImage)
     def update_camera_feed(self, qt_image):
-        pixmap = QPixmap.fromImage(qt_image)
-        self.labelCamera.setPixmap(pixmap.scaled(self.labelCamera.size(),
-                                                  Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        # Cập nhật khung hình camera
+        if hasattr(self, 'labelCamera') and models_loaded:
+            try:
+                pixmap = QPixmap.fromImage(qt_image)
+                self.labelCamera.setPixmap(pixmap.scaled(self.labelCamera.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            except Exception as e:
+                print(f"Lỗi khi cập nhật khung hình camera: {e}")
 
-    # --- SỬA ĐỔI HÀM NÀY ---
-    @pyqtSlot(np.ndarray, str, str) # Vẫn nhận face_crop_bgr nhưng không dùng để hiển thị nữa
+    @pyqtSlot(np.ndarray, str, str)
     def update_recognition_info(self, face_crop_bgr, name, id_):
-        """Hiển thị tên, id và ảnh gốc của người được nhận diện."""
+        """Cập nhật giao diện với thông tin tên, ID và ảnh của người được nhận diện."""
         self.txt_name_person.setText(name)
         self.txt_id_person.setText(id_)
 
-        # --- Tìm và hiển thị ảnh gốc từ thư mục Images ---
-        found_image_path = None
-        # Kiểm tra xem thư mục ảnh có tồn tại không
-        if os.path.isdir(IMAGES_FOLDER):
+        # Tìm thư mục và ảnh của người dùng
+        photo_path = None
+        person_folder = None
+
+        if os.path.isdir(dataset_folder):
+            folder_prefix = f"{id_}_"
             try:
-                # Duyệt qua các file trong thư mục ảnh
-                for filename in os.listdir(IMAGES_FOLDER):
-                    # Kiểm tra xem tên file có bắt đầu bằng "ID_" không
-                    if filename.startswith(id_ + "_"):
-                        found_image_path = os.path.join(IMAGES_FOLDER, filename)
-                        break 
+                for item in os.listdir(dataset_folder):
+                    item_path = os.path.join(dataset_folder, item)
+                    if os.path.isdir(item_path) and item.startswith(folder_prefix):
+                        person_folder = item_path
+                        for file in os.listdir(person_folder):
+                            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                                photo_path = os.path.join(person_folder, file)
+                                break
+                        break
             except Exception as e:
-                print(f"Lỗi khi tìm kiếm ảnh cho ID {id_}: {e}")
+                print(f"[LỖI] Lỗi khi tìm ảnh cho ID {id_}: {e}")
 
         # Hiển thị ảnh nếu tìm thấy
-        if found_image_path and os.path.exists(found_image_path):
-            pixmap = QPixmap(found_image_path) # Tải ảnh gốc
-            if not pixmap.isNull(): # Kiểm tra xem ảnh có tải được không
-                self.labelPicturePerson.setPixmap(pixmap.scaled(self.labelPicturePerson.size(),
-                                                                 Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        if photo_path and os.path.exists(photo_path):
+            pixmap = QPixmap(photo_path)
+            if not pixmap.isNull():
+                self.labelPicturePerson.setPixmap(pixmap.scaled(self.labelPicturePerson.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
-                print(f"Không thể tải ảnh: {found_image_path}")
-                self.labelPicturePerson.setText("Ảnh lỗi")
+                self.labelPicturePerson.setText("Ảnh không hợp lệ")
+        elif person_folder:
+            self.labelPicturePerson.setText("Không có ảnh trong thư mục")
         else:
-            # Không tìm thấy ảnh hoặc đường dẫn không hợp lệ
-            print(f"Không tìm thấy ảnh gốc cho ID: {id_} trong thư mục {IMAGES_FOLDER}")
-            self.labelPicturePerson.setText("Không có ảnh")
-        # --- Kết thúc phần sửa đổi ---
+            self.labelPicturePerson.setText("Không tìm thấy ảnh")
 
     @pyqtSlot()
     def clear_recognition_info(self):
-        """Xóa thông tin người dùng khỏi giao diện."""
-        if self.txt_id_person.toPlainText() != "":
+        """Xóa thông tin người dùng khỏi giao diện khi không nhận diện được."""
+        if self.txt_id_person.toPlainText():
             self.txt_name_person.clear()
             self.txt_id_person.clear()
-            # Đặt lại label ảnh về trạng thái mặc định
             self.labelPicturePerson.setText("(Chưa nhận diện)")
+            self.labelPicturePerson.setPixmap(QPixmap())
 
     @pyqtSlot(str)
     def show_worker_error(self, error_message):
+        # Hiển thị lỗi từ worker
+        self.statusBar().showMessage(f"Lỗi Worker: {error_message}", 10000)
         QMessageBox.warning(self, "Lỗi Worker", error_message)
 
     @pyqtSlot(int)
     def update_status_bar(self, count):
-         if count > 0:
-             self.statusBar().showMessage(f"Sẵn sàng nhận diện ({count} người đã biết)")
-         else:
-             self.statusBar().showMessage("Chưa có dữ liệu nhận diện. Vui lòng thêm người dùng.")
+        # Cập nhật thanh trạng thái
+        if not models_loaded:
+            self.statusBar().showMessage("LỖI KHỞI TẠO MODEL!")
+            return
+        if count > 0:
+            self.statusBar().showMessage(f"Sẵn sàng nhận diện ({count} người đã biết)")
+        elif count == 0:
+            self.statusBar().showMessage("Chưa có dữ liệu nhận diện. Vui lòng thêm người dùng.")
+        else:
+            self.statusBar().showMessage("Lỗi tải dữ liệu nhận diện.")
 
     def open_add_user_dialog(self):
+        """Mở cửa sổ thêm người dùng, tạm dừng worker nếu đang chạy."""
+        if not models_loaded:
+            QMessageBox.critical(self, "Lỗi", "Model chưa tải. Không thể thêm người dùng.")
+            return
         if not self.recognition_worker:
-            QMessageBox.critical(self,"Lỗi", "Worker nhận diện chưa sẵn sàng.")
+            QMessageBox.critical(self, "Lỗi", "Worker nhận diện chưa khởi tạo.")
             return
 
         worker_was_running = False
         if self.recognition_worker.isRunning():
-            print("Đang dừng worker chính để mở dialog Thêm Người Dùng...")
             self.recognition_worker.stop()
             worker_was_running = True
-            print("Worker chính đã dừng.")
-        else:
-             print("Worker chính không chạy, không cần dừng.")
 
-        if self.add_user_dialog is None:
-            self.add_user_dialog = AddUserDialog(self)
-            self.add_user_dialog.user_added.connect(self.handle_user_added)
-
-        print("Đang mở dialog Thêm Người Dùng...")
+        self.add_user_dialog = AddUserDialog(self)
+        self.add_user_dialog.user_added.connect(self.handle_user_added)
         result = self.add_user_dialog.exec_()
-        print(f"Dialog Thêm Người Dùng đã đóng với kết quả: {'Đồng ý' if result == QDialog.Accepted else 'Hủy/Đóng'}")
 
         if worker_was_running and not self.recognition_worker.isRunning():
-             print("Đang khởi động lại worker chính...")
-             self.recognition_worker.start()
-             print("Worker chính đã khởi động lại.")
-        elif not worker_was_running:
-             print("Worker chính không chạy trước đó, không cần khởi động lại.")
+            self.recognition_worker.start()
+            self.statusBar().showMessage("Đang khởi động lại worker nhận diện...")
+
+        self.add_user_dialog.deleteLater()
+        self.add_user_dialog = None
 
     @pyqtSlot()
     def handle_user_added(self):
-        print("AppMain: Nhận tín hiệu user_added. Yêu cầu worker tải lại embeddings...")
+        """Xử lý khi thêm người dùng thành công và tải lại embedding."""
         if self.recognition_worker:
             self.recognition_worker.reload_embeddings()
+            self.statusBar().showMessage("Đã thêm người dùng. Đang cập nhật dữ liệu nhận diện...")
 
     def closeEvent(self, event):
-        print("Đang đóng ứng dụng chính...")
+        """Dọn dẹp trước khi đóng ứng dụng."""
         if self.recognition_worker and self.recognition_worker.isRunning():
-            print("Đang dừng worker nhận diện...")
             self.recognition_worker.stop()
         if self.add_user_dialog and self.add_user_dialog.isVisible():
-             self.add_user_dialog.close()
-        print("Dọn dẹp hoàn tất. Thoát ứng dụng.")
+            self.add_user_dialog.reject()
         event.accept()
 
-# --- Điểm bắt đầu thực thi ứng dụng ---
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-
-    if not MODELS_LOADED:
-        sys.exit(1)
-
-    main_window = FaceRecognitionApp(DETECTOR, EMBEDDER)
+    main_window = FaceRecognitionApp(detector, embedder)
     main_window.show()
-
     sys.exit(app.exec_())
