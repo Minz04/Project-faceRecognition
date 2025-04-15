@@ -1,0 +1,19 @@
+# Môi trường ảo Python
+.venv/
+venv/
+env/
+
+# Thư mục cache của Python
+__pycache__/
+*.py[cod]
+
+# File hệ điều hành
+.DS_Store
+Thumbs.db
+
+# File cấu hình IDE
+.vscode/
+.idea/
+
+# Thư mục chứa ảnh đã được mã hóa
+EmbeddingPicture/Embeddings_Facenet.p
